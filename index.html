@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Advanced 3D Shader & Scene Editor</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #111; }
+        canvas { display: block; }
+        .text-overlay { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); color: white; font-size: clamp(4vw, 80px, 10vw); font-weight: bold; pointer-events: none; z-index: -1; text-shadow: 0 0 15px rgba(0,0,0,0.5); }
+        .lil-gui.root { top: 10px !important; right: 10px !important; }
+    </style>
+</head>
+<body>
+    <div class="text-overlay">hello world!</div>
+    <canvas id="c"></canvas>
+
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+            "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/",
+            "postprocessing": "https://esm.sh/postprocessing@6.33.4"
+        }
+    }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+        import { RGBELoader } from 'three/addons/loaders/RGBELoader.js';
+        import { GUI } from 'three/addons/libs/lil-gui.module.min.js';
+        import { EffectComposer, RenderPass, EffectPass, BloomEffect, ChromaticAberrationEffect } from 'postprocessing';
+
+        // --- Shader Code for Illusion Background ---
+        const illusionVertexShader = `varying vec2 vUv; void main() { vUv = uv; gl_Position = vec4(position.xy, 1.0, 1.0); }`;
+        const illusionFragmentShader = `varying vec2 vUv; uniform float u_time; uniform int u_effect_type; uniform float u_speed; uniform float u_frequency; uniform float u_amplitude; vec3 hsv2rgb(vec3 c) { vec4 K = vec4(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0); vec3 p = abs(fract(c.xxx + K.xyz) * 6.0 - K.www); return c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y); } void main() { vec2 p = vUv - 0.5; float hue = 0.0; if (u_effect_type == 0) { float r = length(p) * 2.0; float a = atan(p.y, p.x); hue = (a + u_time * u_speed) / (3.14159 * 2.0) + r * u_frequency; } else { hue = (sin(p.x * u_frequency + u_time * u_speed) + cos(p.y * u_frequency + u_time * u_speed)) * u_amplitude; } vec3 color = hsv2rgb(vec3(fract(hue), 1.0, 1.0)); gl_FragColor = vec4(color, 1.0); }`;
+
+        let scene, camera, renderer, controls, gui, clock, composer;
+        let glassMaterial, glassMesh, customModelsFolder;
+        let bloomEffect, chromaticAberrationEffect, illusionQuad, illusionMaterial;
+        const sceneObjects = [];
+
+        const params = {
+            shape: 'Torus', autoRotate: true,
+            hdriRotationY: 0, hdriRotationX: 0,
+            backgroundType: 'Solid Color', solidBgColor: '#000000', bodyBgColor: '#111111',
+            illusionActive: false,
+            addCustomModel: () => triggerFileInput('.glb', 'addCustom'),
+            uploadHdri: () => triggerFileInput('.hdr', 'hdri'),
+            uploadNormalMap: () => triggerFileInput('image/*', 'glassNormal'),
+            clearNormalMap: () => {
+                glassMaterial.normalMap = null;
+                glassMaterial.needsUpdate = true;
+            }
+        };
+
+        function init() {
+            clock = new THREE.Clock();
+            scene = new THREE.Scene();
+
+            camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 100);
+            camera.position.set(0, 0, 10);
+
+            const canvas = document.querySelector('#c');
+            renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.toneMapping = THREE.ACESFilmicToneMapping;
+
+            controls = new OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true;
+
+            const light = new THREE.DirectionalLight(0xffffff, 2);
+            light.position.set(2, 5, 5);
+            scene.add(light);
+            scene.add(new THREE.AmbientLight(0xffffff, 0.5));
+            loadHDRI('https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/1k/industrial_sunset_02_puresky_1k.hdr');
+
+            glassMaterial = new THREE.MeshPhysicalMaterial({
+                roughness: 0.0, transmission: 1.0, thickness: 0.2, ior: 1.2, side: THREE.DoubleSide
+            });
+
+            setupIllusionBackground();
+            setupPostProcessing();
+            setupGUI();
+            updateGlassShape();
+            updateBackgroundColor();
+
+            window.addEventListener('resize', onWindowResize);
+            animate();
+        }
+
+        function setupIllusionBackground() { /* ... same as before ... */
+            illusionMaterial = new THREE.ShaderMaterial({ vertexShader: illusionVertexShader, fragmentShader: illusionFragmentShader, uniforms: { u_time: { value: 0.0 }, u_effect_type: { value: 0 }, u_speed: { value: 0.5 }, u_frequency: { value: 5.0 }, u_amplitude: { value: 0.2 } }, depthTest: false, depthWrite: false });
+            const illusionGeometry = new THREE.PlaneGeometry(2, 2);
+            illusionQuad = new THREE.Mesh(illusionGeometry, illusionMaterial);
+            illusionQuad.visible = false;
+            scene.add(illusionQuad);
+        }
+        function setupPostProcessing() { /* ... same as before ... */
+            composer = new EffectComposer(renderer); composer.addPass(new RenderPass(scene, camera)); bloomEffect = new BloomEffect({ intensity: 1.0, kernelSize: 3, luminanceThreshold: 0.5, luminanceSmoothing: 0.4 }); chromaticAberrationEffect = new ChromaticAberrationEffect({ offset: new THREE.Vector2(0.001, 0.001) }); const effectPass = new EffectPass(camera, bloomEffect, chromaticAberrationEffect); composer.addPass(effectPass);
+        }
+        
+        function setupGUI() {
+            if (gui) gui.destroy();
+            gui = new GUI({ title: 'Controls' });
+
+            const glassFolder = gui.addFolder('Glass Shape');
+            glassFolder.add(params, 'shape', ['Torus', 'Sphere', 'Box', 'Custom GLB', 'None']).name('Shape').onChange(updateGlassShape);
+            glassFolder.add(params, 'autoRotate').name('Auto-Rotate').onChange(val => { if (!val && glassMesh) glassMesh.rotation.set(0, 0, 0); });
+            
+            const materialFolder = glassFolder.addFolder('Material Properties');
+            materialFolder.add(glassMaterial, 'transmission', 0, 1);
+            materialFolder.add(glassMaterial, 'thickness', 0, 5);
+            materialFolder.add(glassMaterial, 'roughness', 0, 1);
+            materialFolder.add(glassMaterial, 'ior', 1, 2.333);
+            materialFolder.add(params, 'uploadNormalMap').name('Upload Normal Map');
+            materialFolder.add(params, 'clearNormalMap').name('Clear Normal Map');
+            
+            // FIX: Re-added transform controls for the glass shape
+            const transformFolder = glassFolder.addFolder('Transform');
+            if (glassMesh) {
+                const posFolder = transformFolder.addFolder('Position').close();
+                posFolder.add(glassMesh.position, 'x', -5, 5);
+                posFolder.add(glassMesh.position, 'y', -5, 5);
+                posFolder.add(glassMesh.position, 'z', -5, 5);
+                const rotFolder = transformFolder.addFolder('Rotation').close();
+                rotFolder.add(glassMesh.rotation, 'x', -Math.PI, Math.PI);
+                rotFolder.add(glassMesh.rotation, 'y', -Math.PI, Math.PI);
+                rotFolder.add(glassMesh.rotation, 'z', -Math.PI, Math.PI);
+                const scaleFolder = transformFolder.addFolder('Scale').close();
+                scaleFolder.add(glassMesh.scale, 'x', 0.1, 5);
+                scaleFolder.add(glassMesh.scale, 'y', 0.1, 5);
+                scaleFolder.add(glassMesh.scale, 'z', 0.1, 5);
+            }
+
+            const envFolder = gui.addFolder('Environment');
+            envFolder.add(params, 'hdriRotationY', 0, 360).name('HDRI Rotate H').onChange(updateHdriRotation);
+            envFolder.add(params, 'hdriRotationX', 0, 360).name('HDRI Rotate V').onChange(updateHdriRotation);
+            envFolder.add(params, 'uploadHdri').name('Upload Custom HDRI');
+
+            const bgFolder = gui.addFolder('Background');
+            bgFolder.add(params, 'backgroundType', ['Solid Color', 'Environment']).name('Type').onChange(updateBackgroundColor);
+            bgFolder.addColor(params, 'solidBgColor').name('Solid Color').onChange(updateBackgroundColor);
+            bgFolder.addColor(params, 'bodyBgColor').name('Body Color').onChange(updateBackgroundColor);
+            
+            const illusionFolder = gui.addFolder('Illusion Background');
+            illusionFolder.add(params, 'illusionActive').name('Enable Illusion').onChange(toggleIllusion);
+            illusionFolder.add(illusionMaterial.uniforms.u_effect_type, 'value', { Spiral: 0, Waves: 1 }).name('Effect Type');
+            illusionFolder.add(illusionMaterial.uniforms.u_speed, 'value', 0, 2).name('Speed');
+            illusionFolder.add(illusionMaterial.uniforms.u_frequency, 'value', 1, 20).name('Frequency');
+            illusionFolder.add(illusionMaterial.uniforms.u_amplitude, 'value', 0.1, 2.0).name('Amplitude');
+
+            const postFolder = gui.addFolder('Post-Processing');
+            postFolder.add(bloomEffect, 'intensity', 0, 5).name('Bloom Intensity');
+            postFolder.add(chromaticAberrationEffect.offset, 'x', 0, 0.01).name('Chroma H');
+            postFolder.add(chromaticAberrationEffect.offset, 'y', 0, 0.01).name('Chroma V');
+
+            customModelsFolder = gui.addFolder('Custom Models');
+            customModelsFolder.add(params, 'addCustomModel').name('+ Add Custom GLB');
+        }
+
+        function toggleIllusion(isActive) { /* ... same as before ... */
+            illusionQuad.visible = isActive;
+            if (isActive) { scene.background = null; } else { updateBackgroundColor(); }
+        }
+
+        function updateGlassShape() {
+            if (params.shape === 'Custom GLB') { triggerFileInput('.glb', 'glass'); return; }
+            if (glassMesh) { scene.remove(glassMesh); glassMesh.geometry.dispose(); glassMesh = null; }
+            let geometry;
+            if (params.shape !== 'None') {
+                switch (params.shape) {
+                    case 'Sphere': geometry = new THREE.SphereGeometry(2, 64, 64); break;
+                    case 'Box': geometry = new THREE.BoxGeometry(3, 3, 3); break;
+                    default: geometry = new THREE.TorusGeometry(1.5, 0.6, 32, 100); break;
+                }
+                glassMesh = new THREE.Mesh(geometry, glassMaterial);
+                scene.add(glassMesh);
+            }
+            setupGUI();
+        }
+        function loadGlassGLB(url) { /* ... same as before ... */
+            const loader = new GLTFLoader();
+            loader.load(url, (gltf) => {
+                if (glassMesh) { scene.remove(glassMesh); glassMesh.geometry.dispose(); }
+                let newMesh = null;
+                gltf.scene.traverse((child) => { if (child.isMesh && !newMesh) newMesh = child; });
+                if (newMesh) {
+                    glassMesh = new THREE.Mesh(newMesh.geometry, glassMaterial);
+                    const box = new THREE.Box3().setFromObject(glassMesh); const size = box.getSize(new THREE.Vector3()); const center = box.getCenter(new THREE.Vector3()); const maxSize = Math.max(size.x, size.y, size.z); const scale = 4.0 / maxSize; glassMesh.scale.set(scale, scale, scale); glassMesh.position.sub(center.multiplyScalar(scale));
+                    scene.add(glassMesh);
+                    setupGUI();
+                } else { alert("No mesh found in GLB file."); }
+            }, undefined, (error) => alert('Failed to load GLB model for glass.'));
+        }
+        function loadGlassNormalMap(url) {
+            const textureLoader = new THREE.TextureLoader();
+            textureLoader.load(url, (texture) => {
+                texture.wrapS = THREE.RepeatWrapping;
+                texture.wrapT = THREE.RepeatWrapping;
+                glassMaterial.normalMap = texture;
+                glassMaterial.needsUpdate = true;
+            }, undefined, (error) => alert('Failed to load normal map.'));
+        }
+        function addCustomGLB(url) { /* ... same as before ... */
+            const loader = new GLTFLoader();
+            loader.load(url, (gltf) => {
+                const model = gltf.scene;
+                const box = new THREE.Box3().setFromObject(model); const size = box.getSize(new THREE.Vector3()); const center = box.getCenter(new THREE.Vector3()); const maxSize = Math.max(size.x, size.y, size.z); const scale = 4.0 / maxSize; model.scale.set(scale, scale, scale); model.position.sub(center.multiplyScalar(scale));
+                scene.add(model);
+                const modelIndex = sceneObjects.length;
+                const modelFolder = customModelsFolder.addFolder(`Model ${modelIndex + 1}`);
+                const objData = { id: `model_${Date.now()}`, mesh: model, remove: () => { scene.remove(model); modelFolder.destroy(); const indexToRemove = sceneObjects.findIndex(o => o.id === objData.id); if (indexToRemove > -1) sceneObjects.splice(indexToRemove, 1); } };
+                const posFolder = modelFolder.addFolder('Position');
+                posFolder.add(model.position, 'x', -10, 10).listen(); posFolder.add(model.position, 'y', -10, 10).listen(); posFolder.add(model.position, 'z', -10, 10).listen();
+                modelFolder.add(objData, 'remove').name('Remove Model');
+                sceneObjects.push(objData);
+            }, undefined, (error) => alert('Failed to load custom GLB.'));
+        }
+        function loadHDRI(url) { /* ... same as before ... */
+            new RGBELoader().load(url, (texture) => {
+                texture.mapping = THREE.EquirectangularReflectionMapping; scene.environment = texture; updateHdriRotation(); updateBackgroundColor();
+            }, undefined, (error) => alert('Failed to load HDRI.'));
+        }
+        function updateHdriRotation() { /* ... same as before ... */
+            if (scene.environment) { const rotY = THREE.MathUtils.degToRad(params.hdriRotationY); const rotX = THREE.MathUtils.degToRad(params.hdriRotationX); const rotMatrixY = new THREE.Matrix4().makeRotationY(rotY); const rotMatrixX = new THREE.Matrix4().makeRotationX(rotX); scene.environment.matrix.multiplyMatrices(rotMatrixY, rotMatrixX); scene.environment.matrixAutoUpdate = false; }
+        }
+        
+        function updateBackgroundColor() {
+            if (params.illusionActive) { scene.background = null; return; }
+            if (params.backgroundType === 'Environment') { scene.background = scene.environment; } 
+            else { scene.background = new THREE.Color(params.solidBgColor); }
+            document.body.style.backgroundColor = params.bodyBgColor;
+        }
+
+        function triggerFileInput(accept, type) {
+            const input = document.createElement('input');
+            input.type = 'file';
+            input.accept = accept;
+            input.onchange = (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+                const url = URL.createObjectURL(file);
+                if (type === 'hdri') loadHDRI(url);
+                else if (type === 'addCustom') addCustomGLB(url);
+                else if (type === 'glass') loadGlassGLB(url);
+                else if (type === 'glassNormal') loadGlassNormalMap(url);
+            };
+            input.click();
+        }
+        function onWindowResize() { /* ... same as before ... */
+            camera.aspect = window.innerWidth / window.innerHeight; camera.updateProjectionMatrix(); renderer.setSize(window.innerWidth, window.innerHeight); composer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            const delta = clock.getDelta();
+            const elapsedTime = clock.getElapsedTime();
+            if (params.autoRotate && glassMesh) { glassMesh.rotation.y += 0.005; glassMesh.rotation.x += 0.002; }
+            if (illusionMaterial) { illusionMaterial.uniforms.u_time.value = elapsedTime; }
+            controls.update();
+            composer.render(delta);
+        }
+
+        init();
+    </script>
+</body>
+</html>
