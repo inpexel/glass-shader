@@ -107,8 +107,9 @@
             if (gui) gui.destroy();
             gui = new GUI({ title: 'Controls' });
 
+            // NEW CODE
             const glassFolder = gui.addFolder('Glass Shape');
-            glassFolder.add(params, 'shape', ['Torus', 'Sphere', 'Box', 'Custom GLB', 'None']).name('Shape').onChange(updateGlassShape);
+            glassFolder.add(params, 'shape', ['Torus', 'Sphere', 'Box', 'Plane', 'Custom GLB', 'None']).name('Shape').onChange(updateGlassShape);
             glassFolder.add(params, 'autoRotate').name('Auto-Rotate').onChange(val => { if (!val && glassMesh) glassMesh.rotation.set(0, 0, 0); });
             
             const materialFolder = glassFolder.addFolder('Material Properties');
@@ -171,15 +172,17 @@
             if (params.shape === 'Custom GLB') { triggerFileInput('.glb', 'glass'); return; }
             if (glassMesh) { scene.remove(glassMesh); glassMesh.geometry.dispose(); glassMesh = null; }
             let geometry;
-            if (params.shape !== 'None') {
-                switch (params.shape) {
-                    case 'Sphere': geometry = new THREE.SphereGeometry(2, 64, 64); break;
-                    case 'Box': geometry = new THREE.BoxGeometry(3, 3, 3); break;
-                    default: geometry = new THREE.TorusGeometry(1.5, 0.6, 32, 100); break;
-                }
-                glassMesh = new THREE.Mesh(geometry, glassMaterial);
-                scene.add(glassMesh);
-            }
+          // NEW CODE
+if (params.shape !== 'None') {
+    switch (params.shape) {
+        case 'Sphere': geometry = new THREE.SphereGeometry(2, 64, 64); break;
+        case 'Box': geometry = new THREE.BoxGeometry(3, 3, 3); break;
+        case 'Plane': geometry = new THREE.PlaneGeometry(5, 5, 32, 32); break;
+        default: geometry = new THREE.TorusGeometry(1.5, 0.6, 32, 100); break;
+    }
+    glassMesh = new THREE.Mesh(geometry, glassMaterial);
+    scene.add(glassMesh);
+}
             setupGUI();
         }
         function loadGlassGLB(url) { /* ... same as before ... */
